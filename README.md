@@ -1,6 +1,8 @@
 # Sony Xperia 5 IV SOG09: 5G SA, VoNR and Malaysian Carrier Fixes
 
-**Report date:** 1 November 2026, Asia/Kuala_Lumpur.
+**Initial report date:** 1 November 2026, Asia/Kuala_Lumpur.
+
+**Latest update:** 25 November 2026, Asia/Kuala_Lumpur (live NR CA capture and worldwide diagnostic workflow; see section 21).
 
 **Test platform:** Sony Xperia 5 IV SOG09, KDDI/K4, build `64.2.D.2.261`.
 
@@ -45,7 +47,7 @@ The tested corrections require root and revision-matched modem files. The report
 - [18. SISO/MIMO investigation](#18-sisomimo-investigation)
 - [19. Direct DIAG capture: problems and working procedure](#19-direct-diag-capture-problems-and-working-procedure)
 - [20. Diagnostic implementation and SOG09 Signal Lab](#20-diagnostic-implementation-and-sog09-signal-lab)
-- [21. LTE B40 and carrier aggregation](#21-lte-b40-and-carrier-aggregation)
+- [21. LTE B40 and NR carrier aggregation](#21-lte-b40-and-nr-carrier-aggregation)
 - [22. VoNR reset and late-boot recovery module](#22-vonr-reset-and-late-boot-recovery-module)
 - [23. Subscription-specific VoLTE and VoNR icons](#23-subscription-specific-volte-and-vonr-icons)
 - [24. Persistence assessment](#24-persistence-assessment)
@@ -873,7 +875,7 @@ No live PHY rank counters, throughput decoder, NAS/LTE decoding, maps or band lo
 
 Artifacts: [APK](outputs/SOG09-SignalLab/SOG09-SignalLab-0.1.apk), [source archive](outputs/SOG09-SignalLab/SOG09-SignalLab-source.zip), [app instructions](outputs/SOG09-SignalLab/README.md), [hashes](outputs/SOG09-SignalLab/SHA256.json).
 
-## 21. LTE B40 and carrier aggregation
+## 21. LTE B40 and NR carrier aggregation
 
 ### B40 band-policy correction
 
@@ -890,6 +892,38 @@ A controlled removal probe then removed only the two B3+B1 variants from the Mal
 ### Band locking and NR CA limits
 
 With B20/B40 band locking, responses advertised the bands individually without a CA combination list. Removing the lock restored the original CA entries. No active B20+B40 CA was established. Earlier NR capability exchanges advertised n28+n78 and n78+n78; those advertisements are not proof of active NR CA. No verified NR CA binary patch was produced.
+
+### NR CA live recheck — 2026-11-25
+
+A 60-second Qualcomm RRC capture ran during a 25,000,000-byte cellular download with Wi-Fi off. The transfer returned HTTP 200 in 19.50 seconds (about 10.26 Mbit/s). The capture was on Yes 5G SA, n28 ARFCN 152670, PCI 238. It contained 13 NR RRC messages: measurement reports, an RRC reconfiguration that only removed a measurement configuration, and its completion. **No `sCellToAddModList` appeared during this loaded interval**, so no NR secondary cell was configured in the captured exchange. This is direct evidence for this short test, not proof about other locations, times, or an independent network scheduler decision.
+
+The user reported little or no usable n78 at the test location. The measurement report included one weaker NR neighbour, but the captured configuration did not identify that neighbour's frequency band; it must not be labelled n78 from PCI or signal alone. Weak n78 coverage is therefore a plausible reason the network did not add an n78 SCell, not a proven cause. A separate 2026-11-01 trace on this device had an n78 SCell configuration followed by `RRCReconfigurationComplete`; that shows the network previously sent such a configuration and the UE completed the RRC procedure, but it does not establish MAC activation or scheduled user traffic on that SCell.
+
+Android's live `isUsingCarrierAggregation=false`, empty `mCellBandwidths`, and NR `PhysicalChannelConfig` band/bandwidth values of 0 are not treated as decisive: this Sony RIL also returned an invalid NR channel sentinel. The modem-side RRC trace is the stronger evidence. The 25 MB result is a single short throughput sample, not a controlled benchmark, not an isolation of VPN/app-path effects and not a diagnosis of the network's backhaul.
+
+### EFS findings and change decision
+
+- Both live 816-byte `cap_limit_bw` records still contain `0A` at byte `0x4C`, the previously applied n28 bandwidth allowance. This is a per-carrier bandwidth limit; it does not enable NR CA.
+- The live `/mdb/nr/plmn2cacombos_nr.mdb` still matches the stock K4 payload. Its decoded strings include n28+n78 and n78+n78 combinations, but the proprietary PLMN gating/applicability is not established.
+- Explicit live `/nv/item_files/modem/nr5g/RRC/cap_control_nrca_*` records are absent. Absence is not proof that NR CA is disabled. The accessible MR-DC controls have unverified semantics.
+- The short capture did not contain a fresh UE capability information response. Earlier filtered UE capability evidence listed n28+n78 and n78+n78, but a current full unfiltered capability exchange remains outstanding.
+
+No modem/EFS file was changed during this recheck, Wi-Fi was restored, the DIAG helper verified restoration of the original logging mask, root remained active and the phone was not rebooted. **No phone-side CA fix is justified by this evidence.** The current loaded test had no configured SCell, and the user reports weak n78. First repeat at a location with confirmed, usable n78 and sustained cellular download. If no SCell is added there either, capture a fresh UE capability response and carrier RRC policy evidence before investigating an exact device-specific modem filter. Do not guess at a Qualcomm EFS switch, transplant another model's MBN, or change the n28 bandwidth byte to force CA.
+
+Full sanitized findings and the global diagnostic procedure: [NR CA live recheck and troubleshooting](outputs/NR-CA-live-2026-11-25.md).
+
+### Worldwide reuse: diagnostic method, not portable modem bytes
+
+The following workflow applies broadly to 5G NR SA devices; each device/carrier's bands, MBN, RF paths, supported combinations and EFS schema are specific. Do not reuse SOG09/KDDI offsets or Malaysian PLMN mappings on another handset or operator.
+
+1. Record the exact model/variant, Android build, modem/baseband revision, active SIM slot/PLMN and selected MBN. Remove manual RAT/band locks for the baseline and confirm cellular data is the active transport.
+2. Record the serving NR band, ARFCN, bandwidth, PCI, RSRP/RSRQ/SINR and candidate-cell measurements. Confirm that the second band is actually receivable at the location; a 5G icon or a nearby n78 tower is not enough.
+3. Capture a fresh UE NR capability exchange. Decode `supportedBandCombinationList` and its linked feature-set combinations, including per-band bandwidth and DL/UL layer limits. A network-filtered capability request can omit entries; an absent entry in a filtered response is not proof of absent hardware support.
+4. Generate sustained cellular downlink load while capturing modem RRC logs. In `RRCReconfiguration`, look for `sCellToAddModList`; record each SCell index, band, NR-ARFCN/SSB frequency, bandwidth/BWP, and initial `sCellState`. Check for the matching `RRCReconfigurationComplete`.
+5. Do not call an RRC-configured SCell “active CA” without activation/scheduling evidence. Check the SCell activation/deactivation MAC CE or an explicitly activated initial state, then per-carrier PDCCH/PDSCH or modem scheduler counters during traffic. An RRC-complete acknowledgement alone does not prove payload was scheduled on the SCell.
+6. Use Android `ServiceState` and `PhysicalChannelConfig` only as corroboration; OEM RILs can omit NR band/bandwidth or CA state. Prefer validated modem logs and raw capability/RRC evidence.
+7. If the requested combination is not advertised, determine whether the cause is the exact handset SKU/RF design, firmware/MBN filtering, a capability filter or subscription policy. If it is advertised but the network never configures an SCell despite good signal and load, investigate the operator's site, PLMN policy and provisioning. If configured but inactive, inspect MAC activation, timers and scheduling. These cases need different fixes.
+8. Only consider an EFS/MBN change after a specific live record is shown to suppress a supported combination on that exact model and firmware. Preserve a binary backup and hash, change one documented field, read it back byte-for-byte, validate under load, and keep a tested rollback. Do not guess at profile bytes or infer an undocumented switch from its filename.
 
 ## 22. VoNR reset and late-boot recovery module
 
@@ -956,6 +990,7 @@ Some historical EFS writes were performed manually through EFS Explorer. No univ
 
 - Identify the underlying n28 one-layer capability source without inventing an undocumented EFS switch.
 - Capture n78 capability, PUSCH/SRS configuration and actual UL scheduling under stronger signal and sustained load.
+- Repeat NR CA capture with confirmed usable n78 coverage; obtain current full UE capability and SCell activation/scheduling evidence.
 - Test U Mobile/Maxis mappings with their actual SIMs and complete voice/data validation.
 - Isolate the NR voice reset writer if it recurs.
 - Resolve automatic root startup independently from modem provisioning.
@@ -976,6 +1011,8 @@ Official deployment information checked during this investigation:
 
 - [AOSP AVB implementation and documentation](https://android.googlesource.com/platform/external/avb/)
 - [ETSI TS 38.306 — UE radio access capabilities](https://www.etsi.org/deliver/etsi_ts/138300_138399/138306/16.05.00_60/ts_138306v160500p.pdf)
+- [ETSI TS 38.331 — NR RRC protocol specification](https://www.etsi.org/deliver/etsi_ts/138300_138399/138331/18.08.00_60/ts_138331v180800p.pdf)
+- [ETSI TS 38.321 — NR MAC protocol specification](https://www.etsi.org/deliver/etsi_ts/138300_138399/138321/16.04.00_60/ts_138321v160400p.pdf)
 - [ETSI TS 38.214 — physical-layer data procedures](https://www.etsi.org/deliver/etsi_ts/138200_138299/138214/16.06.00_60/ts_138214v160600p.pdf)
 - [KDDI SOG09 implemented frequency list](https://www.au.com/content/dam/au-com/mobile/product/smartphone/sog09/pdf/sog09_syuuhasu.pdf)
 - [libqmi primary schemas](https://github.com/linux-mobile-broadband/libqmi)
